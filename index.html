@@ -57,7 +57,8 @@ textarea{resize:vertical;min-height:115px;line-height:1.7}input:focus,textarea:f
 .task input{width:18px;height:18px;margin-top:3px;accent-color:var(--purple)}.task p{margin:0;font-size:14px;line-height:1.7}
 .secret{text-align:center;padding:25px 10px}.lock{font-size:44px;color:var(--purple);margin-bottom:20px}.secret.unlocked{text-align:left}
 footer{text-align:center;color:#918ba5;font-size:12px;line-height:1.8;margin-top:35px}
-.notice{background:#eee6f0;padding:13px;border-radius:7px;color:#746582;font-size:12px;line-height:1.6;margin-top:20px}
+.notice{background:#eee6f0;padding:13px;border-radius:7px;color:#746582;font-size:12px;line-height:1.6;margin-top:20px}.locked-card{opacity:.72;background:#eee8e0}.countdown{font:12px Arial,sans-serif;color:#806b9e;line-height:1.7;margin-top:9px}.locked-message{text-align:center;padding:24px 8px}.locked-message .lock{font-size:42px}button:disabled{opacity:.45;cursor:not-allowed;transform:none!important}
+.divider{height:1px;background:var(--line);margin:22px 0}.cover .divider{width:60px;margin:18px auto;background:#c9b4e855}
 @media(max-width:480px){.container{padding:22px 13px 45px}.cover{min-height:350px;padding:22px}.cover h2{font-size:30px}.paper{padding:23px 18px}.nav{gap:6px}.nav button{padding:9px 11px;font-size:11px}}
 </style>
 </head>
@@ -84,7 +85,7 @@ footer{text-align:center;color:#918ba5;font-size:12px;line-height:1.8;margin-top
 <section id="app" class="app hidden">
   <div class="nav">
     <button class="active" data-tab="chapters">Главы</button>
-    <button data-tab="diary">Дневник</button>
+    <button data-tab="diary">Наша книга</button>
     <button data-tab="tasks">Задания</button>
     <button data-tab="letters">Письма</button>
     <button data-tab="secret">Секретная глава</button>
@@ -95,6 +96,9 @@ footer{text-align:center;color:#918ba5;font-size:12px;line-height:1.8;margin-top
 <footer>Эта история пишется двумя людьми.<br>И ни одна страница не должна быть написана через силу.<br><br>✧</footer>
 </main>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script src="config.js"></script>
 <script>
 const KEY="our_story_book_v2";
 const chapters=[
@@ -106,58 +110,174 @@ const chapters=[
 ];
 const tasks=["Рассказать друг другу о маленькой вещи, которая сегодня порадовала.","Выбрать песню, которая описывает твоё сегодняшнее настроение.","Придумать одно необычное совместное приключение.","Рассказать о месте, в котором хотелось бы побывать.","Поделиться одной детской мечтой.","Отправить фотографию того, что сейчас кажется красивым.","Придумать собственную маленькую традицию.","Устроить вечер без телефонов и спешки.","Рассказать друг другу о чём-то новом, чего раньше не знали.","Написать друг другу короткое письмо без повода."];
 const secretQuestions=["Что бы ты хотела, чтобы я поняла о тебе без необходимости объяснять?","Какой момент в жизни изменил твоё отношение к близости?","Есть ли что-то, что ты давно хотела сказать, но не находила подходящего момента?","Что помогает тебе чувствовать себя в безопасности рядом с человеком?","Если бы мы могли оставить одну вещь в прошлом, что бы это было?"];
-let data={entries:{},comments:{},letters:[],tasks:{},secretUnlocked:false};
-try{const saved=JSON.parse(localStorage.getItem(KEY));if(saved)data={...data,...saved}}catch(e){console.warn("Не удалось загрузить архив",e)}
+let data={entries:{},comments:{},letters:[],tasks:{},secretUnlocked:false,journeyStarts:null};
+try{const saved=JSON.parse(localStorage.getItem(KEY));if(saved&&typeof saved==="object")data={...data,...saved}}catch(e){console.warn("Не удалось загрузить архив",e)}
+if(!data.entries||typeof data.entries!=="object")data.entries={};if(!data.comments||typeof data.comments!=="object")data.comments={};if(!data.tasks||typeof data.tasks!=="object")data.tasks={};if(!Array.isArray(data.letters))data.letters=[];
+const THREE_DAYS=3*24*60*60*1000;
+if(!Array.isArray(data.journeyStarts)||data.journeyStarts.length!==2){
+ data.journeyStarts=[null,null];
+ [0,1].forEach(p=>{let furthest=-1;chapters.forEach((chapter,ci)=>chapter.questions.forEach((question,qi)=>{const entry=data.entries[ci+"-"+qi];if(Array.isArray(entry)&&entry[p]&&String(entry[p]).trim())furthest=Math.max(furthest,ci)}));if(furthest>=0)data.journeyStarts[p]=Date.now()-furthest*THREE_DAYS});
+ delete data.journeyStartedAt;
+ try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){}
+}
 let currentTab="chapters",currentChapter=0,currentQuestion=0,currentPerson=0;
-const people=["Я","Ты"];
-function save(){try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){alert("Не удалось сохранить данные. Возможно, закончилось место в хранилище.")}}
+const people=["Таня","Настя"];
+function normalizeFrom(name){return name==="Я"?people[0]:name==="Ты"?people[1]:name}
+data.letters.forEach(l=>{if(l&&typeof l==="object")l.from=normalizeFrom(l.from)});
+let saveFailedShown=false;
+function save(){syncPush();try{localStorage.setItem(KEY,JSON.stringify(data));saveFailedShown=false}catch(e){if(!saveFailedShown){saveFailedShown=true;alert("Не удалось сохранить данные. Возможно, закончилось место в хранилище или браузер блокирует сохранение.")}}}
 function entryKey(c,q){return c+"-"+q}
 function escapeHTML(value){return String(value).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]))}
 function dateNow(){return new Date().toLocaleString("ru-RU",{dateStyle:"short",timeStyle:"short"})}
-function openBook(){document.getElementById("cover").classList.add("open");setTimeout(()=>{document.getElementById("coverSection").classList.add("hidden");document.getElementById("app").classList.remove("hidden");render()},650)}
+function personStart(p=currentPerson){const t=Number(data.journeyStarts[p]);return t>0?t:null}
+function chapterUnlockAt(index,p=currentPerson){if(index===0)return 0;const start=personStart(p);return start===null?Infinity:start+index*THREE_DAYS}
+function isChapterUnlocked(index,p=currentPerson){return Date.now()>=chapterUnlockAt(index,p)}
+function waitText(index){const at=chapterUnlockAt(index);return at===Infinity?people[currentPerson]+" ещё не начинала первую главу — таймер запустится, когда начнёт писать.":"До открытия: "+countdownText(at-Date.now())}
+function countdownTag(index){return `<div class="countdown" ${chapterUnlockAt(index)===Infinity?"":`data-chapter="${index}"`}>${waitText(index)}</div>`}
+function countdownText(ms){
+ const total=Math.max(0,Math.ceil(ms/1000)),days=Math.floor(total/86400),hours=Math.floor((total%86400)/3600),minutes=Math.floor((total%3600)/60),seconds=total%60;
+ return (days?days+" дн. ":"")+(days||hours?hours+" ч. ":"")+(days||hours||minutes?minutes+" мин. ":"")+seconds+" сек.";
+}
+function chapterNavigation(){
+ return `<div id="chapterNav"><div class="divider"></div><div class="paper-label">Навигация по главам</div><div class="small">Таймер сейчас: ${people[currentPerson]}</div><div class="cards">${chapters.map((c,i)=>{
+  const unlocked=isChapterUnlocked(i);
+  return `<div class="card ${unlocked?'':'locked-card'}"><div class="paper-label">Глава ${i+1}</div><h3>${c.title}</h3>${unlocked?`<div class="small">Открыта ✧</div><button class="secondary" onclick="goChapter(${i})">Открыть</button>`:`${countdownTag(i)}<button class="secondary" disabled>Пока закрыта 🔒</button>`}</div>`;
+ }).join("")}</div></div>`;
+}
+function updateCountdowns(){
+ let unlockedNow=false;
+ document.querySelectorAll(".countdown[data-chapter]").forEach(el=>{
+  const remaining=chapterUnlockAt(Number(el.dataset.chapter))-Date.now();
+  if(remaining<=0)unlockedNow=true;else el.textContent="До открытия: "+countdownText(remaining);
+ });
+ if(!unlockedNow||currentTab!=="chapters")return;
+ if(!isChapterUnlocked(currentChapter)){render();return}
+ const nav=document.getElementById("chapterNav");
+ if(nav)nav.outerHTML=chapterNavigation();
+}
+function openBook(){document.getElementById("cover").classList.add("open");setTimeout(()=>{document.getElementById("coverSection").classList.add("hidden");document.getElementById("app").classList.remove("hidden");render()},1000)}
 document.querySelectorAll("[data-tab]").forEach(button=>button.addEventListener("click",()=>{currentTab=button.dataset.tab;document.querySelectorAll("[data-tab]").forEach(b=>b.classList.toggle("active",b===button));render()}));
 function render(){const content=document.getElementById("content");if(currentTab==="chapters")content.innerHTML=renderChapters();if(currentTab==="diary")content.innerHTML=renderDiary();if(currentTab==="tasks")content.innerHTML=renderTasks();if(currentTab==="letters")content.innerHTML=renderLetters();if(currentTab==="secret")content.innerHTML=renderSecret();if(currentTab==="data")content.innerHTML=renderData()}
 function renderChapters(){
+ if(!isChapterUnlocked(currentChapter)){
+  return `<div class="paper page locked-message"><div class="lock">✧ 🔒 ✧</div><div class="paper-label">Эта глава пока закрыта</div><h2>${chapters[currentChapter].title}</h2><p class="paper-desc">Новые страницы открываются постепенно — одна глава каждые три дня после того, как каждая из вас начнёт писать первую главу. Не нужно торопить эту историю.</p><div class="divider"></div>${countdownTag(currentChapter)}${chapterNavigation()}</div>`;
+ }
  const chapter=chapters[currentChapter],key=entryKey(currentChapter,currentQuestion),entry=data.entries[key]||[];
  const answered=chapter.questions.filter((q,i)=>{const e=data.entries[entryKey(currentChapter,i)];return e&&(e[0]||e[1])}).length,progress=answered/chapter.questions.length*100;
- return `<div class="paper page"><div class="paper-label">Глава ${currentChapter+1} · ${chapters.length}</div><h2>${chapter.title}</h2><div class="paper-desc">${chapter.desc}</div><div class="progress"><div style="width:${progress}%"></div></div><div class="small">Заполнено вопросов: ${answered} из ${chapter.questions.length}</div><div class="divider"></div><div class="paper-label">Вопрос ${currentQuestion+1} из ${chapter.questions.length}</div><h3>${chapter.questions[currentQuestion]}</h3><label class="field-label">Кто отвечает?</label><div class="row"><button class="${currentPerson===0?'primary':'secondary'}" onclick="switchPerson(0)">Моя сторона</button><button class="${currentPerson===1?'primary':'secondary'}" onclick="switchPerson(1)">Её сторона</button></div><label class="field-label">Твой ответ</label><textarea id="answerInput" placeholder="Пиши так, как чувствуешь..." oninput="saveEntry()">${escapeHTML(entry[currentPerson]||"")}</textarea><div class="small" id="saveLabel">Сохранение автоматически</div><div class="divider"></div><div class="row"><button class="secondary" onclick="previousQuestion()" ${currentChapter===0&&currentQuestion===0?'disabled':''}>← Назад</button><button class="primary" onclick="nextQuestion()">${currentChapter===4&&currentQuestion===4?'Завершить':'Далее →'}</button></div><div class="divider"></div><div class="paper-label">Навигация по главам</div><div class="cards">${chapters.map((c,i)=>`<div class="card"><div class="paper-label">Глава ${i+1}</div><h3>${c.title}</h3><button class="secondary" onclick="goChapter(${i})">Открыть</button></div>`).join("")}</div></div>`;
+ return `<div class="paper page"><div class="paper-label">Глава ${currentChapter+1} · ${chapters.length}</div><h2>${chapter.title}</h2><div class="paper-desc">${chapter.desc}</div><div class="progress"><div style="width:${progress}%"></div></div><div class="small">Заполнено вопросов: ${answered} из ${chapter.questions.length}</div><div class="divider"></div><div class="paper-label">Вопрос ${currentQuestion+1} из ${chapter.questions.length}</div><h3>${chapter.questions[currentQuestion]}</h3><label class="field-label">Кто отвечает?</label><div class="row"><button class="${currentPerson===0?'primary':'secondary'}" onclick="switchPerson(0)">${people[0]}</button><button class="${currentPerson===1?'primary':'secondary'}" onclick="switchPerson(1)">${people[1]}</button></div><label class="field-label">Ответ: ${people[currentPerson]}</label><textarea id="answerInput" placeholder="Пиши так, как чувствуешь..." oninput="saveEntry()">${escapeHTML(entry[currentPerson]||"")}</textarea><div class="small" id="saveLabel">Сохранение автоматически</div><div class="divider"></div><div class="row"><button class="secondary" onclick="previousQuestion()" ${currentChapter===0&&currentQuestion===0?'disabled':''}>← Назад</button><button class="primary" onclick="nextQuestion()">${currentChapter===4&&currentQuestion===4?'Завершить':'Далее →'}</button></div>${chapterNavigation()}</div>`;
 }
-function saveEntry(){const key=entryKey(currentChapter,currentQuestion);if(!data.entries[key])data.entries[key]=["",""];data.entries[key][currentPerson]=document.getElementById("answerInput").value;save();document.getElementById("saveLabel").textContent="Сохранено ✧"}
+function saveEntry(){const input=document.getElementById("answerInput");if(!input)return;const key=entryKey(currentChapter,currentQuestion);if(!data.entries[key])data.entries[key]=["",""];data.entries[key][currentPerson]=input.value;if(input.value.trim()&&!personStart()){data.journeyStarts[currentPerson]=Date.now();const nav=document.getElementById("chapterNav");if(nav)nav.outerHTML=chapterNavigation()}save();const label=document.getElementById("saveLabel");if(label)label.textContent="Сохранено ✧"}
 function switchPerson(index){saveEntry();currentPerson=index;render()}
-function goChapter(index){saveEntry();currentChapter=index;currentQuestion=0;render()}
-function nextQuestion(){saveEntry();if(currentQuestion<chapters[currentChapter].questions.length-1)currentQuestion++;else if(currentChapter<chapters.length-1){currentChapter++;currentQuestion=0}else{alert("Все основные вопросы пройдены. Загляни в дневник и секретную главу ✧")}render();window.scrollTo({top:0,behavior:"smooth"})}
+function goChapter(index){if(!isChapterUnlocked(index)){alert(chapterUnlockAt(index)===Infinity?people[currentPerson]+" ещё не начинала первую главу — таймер запустится, когда начнёт писать.":"Эта глава откроется через "+countdownText(chapterUnlockAt(index)-Date.now())+".");return}saveEntry();currentChapter=index;currentQuestion=0;render()}
+function nextQuestion(){saveEntry();if(currentQuestion<chapters[currentChapter].questions.length-1)currentQuestion++;else if(currentChapter<chapters.length-1){if(!isChapterUnlocked(currentChapter+1)){alert(chapterUnlockAt(currentChapter+1)===Infinity?"Сначала напиши хотя бы один ответ в первой главе, "+people[currentPerson]+" — тогда запустится твой таймер.":"Эта глава закончилась ✧ Следующая откроется через "+countdownText(chapterUnlockAt(currentChapter+1)-Date.now())+".");return}currentChapter++;currentQuestion=0}else{alert("Все основные вопросы пройдены. Загляни в дневник и секретную главу ✧")}render();window.scrollTo({top:0,behavior:"smooth"})}
 function previousQuestion(){saveEntry();if(currentQuestion>0)currentQuestion--;else if(currentChapter>0){currentChapter--;currentQuestion=chapters[currentChapter].questions.length-1}render()}
 function renderDiary(){
- let html=`<div class="paper page"><div class="paper-label">Наши записи</div><h2>Общий дневник</h2><div class="paper-desc">Здесь остаются наши ответы, мысли и комментарии.</div><div class="divider"></div>`,count=0;
+ let html=`<div class="paper page"><div class="paper-label">Наши записи</div><h2>Наша книга</h2><div class="paper-desc">Здесь остаются наши ответы, мысли и комментарии.</div><div class="divider"></div>`,count=0;
  chapters.forEach((chapter,ci)=>chapter.questions.forEach((question,qi)=>{const key=entryKey(ci,qi),entry=data.entries[key];if(!entry||(!entry[0]&&!entry[1]))return;count++;html+=`<div class="entry"><div class="entry-meta">ГЛАВА ${ci+1} · ${chapter.title}</div><div class="entry-question">${question}</div>${entry.map((answer,pi)=>answer?`<div class="entry"><div class="entry-meta">${people[pi]}</div><div class="entry-answer">${escapeHTML(answer)}</div></div>`:"").join("")}<label class="field-label">Комментарий друг другу</label><textarea id="comment-${key}" placeholder="Что хочется ответить?" oninput="saveComment('${key}')">${escapeHTML(data.comments[key]||"")}</textarea><div class="small" id="comment-status-${key}">Комментарий сохраняется автоматически</div></div>`}));
  if(!count)html+=`<div class="empty">Пока здесь тихо.<br>Ответы на вопросы появятся в этом дневнике.</div>`;return html+"</div>";
 }
 function saveComment(key){data.comments[key]=document.getElementById("comment-"+key).value;save();const status=document.getElementById("comment-status-"+key);if(status)status.textContent="Сохранено ✧"}
 function renderTasks(){return `<div class="paper page"><div class="paper-label">Маленькие шаги</div><h2>Наши задания</h2><div class="paper-desc">Не соревнование и не список обязательств. Просто маленькие поводы провести время вместе.</div><div class="divider"></div>${tasks.map((task,i)=>`<div class="task"><input type="checkbox" ${data.tasks[i]?'checked':''} onchange="toggleTask(${i},this.checked)"><div><p>${task}</p><div class="small">${data.tasks[i]?'Выполнено ✧':'Можно выполнить в удобное время'}</div></div></div>`).join("")}<div class="notice">Некоторые задания можно выполнять вместе, другие — по отдельности и потом делиться результатом.</div></div>`}
 function toggleTask(i,value){data.tasks[i]=value;save();render()}
-function renderLetters(){return `<div class="paper page"><div class="paper-label">Личные послания</div><h2>Письма друг другу</h2><div class="paper-desc">Иногда проще написать то, что сложно сказать вслух.</div><div class="divider"></div><label class="field-label">От кого?</label><div class="row"><button class="${currentPerson===0?'primary':'secondary'}" onclick="setLetterPerson(0)">От меня</button><button class="${currentPerson===1?'primary':'secondary'}" onclick="setLetterPerson(1)">От неё</button></div><label class="field-label">Тема письма</label><input id="letterTitle" placeholder="Например: Одна мысль..."><label class="field-label">Текст письма</label><textarea id="letterBody" placeholder="Напиши то, что хочется сказать..."></textarea><div class="row"><button class="primary" onclick="addLetter()">Сохранить письмо ✧</button></div><div class="divider"></div><div class="paper-label">Наши письма</div>${data.letters.length?data.letters.slice().reverse().map(l=>`<div class="letter"><div class="entry-meta">${escapeHTML(l.from)} · ${escapeHTML(l.date)}</div><h3>${escapeHTML(l.title)}</h3><div class="letter-body">${escapeHTML(l.body)}</div></div>`).join(""):`<div class="empty">Здесь пока нет писем.<br>Первое может появиться сегодня.</div>`}</div>`}
+function renderLetters(){return `<div class="paper page"><div class="paper-label">Личные послания</div><h2>Письма друг другу</h2><div class="paper-desc">Иногда проще написать то, что сложно сказать вслух.</div><div class="divider"></div><label class="field-label">От кого письмо?</label><div class="row"><button class="${currentPerson===0?'primary':'secondary'}" onclick="setLetterPerson(0)">${people[0]}</button><button class="${currentPerson===1?'primary':'secondary'}" onclick="setLetterPerson(1)">${people[1]}</button></div><label class="field-label">Тема письма</label><input id="letterTitle" placeholder="Например: Одна мысль..."><label class="field-label">Текст письма</label><textarea id="letterBody" placeholder="Напиши то, что хочется сказать..."></textarea><div class="row"><button class="primary" onclick="addLetter()">Сохранить письмо ✧</button></div><div class="divider"></div><div class="paper-label">Наши письма</div>${data.letters.length?data.letters.slice().reverse().map(l=>`<div class="letter"><div class="entry-meta">${escapeHTML(l.from)} · ${escapeHTML(l.date)}</div><h3>${escapeHTML(l.title)}</h3><div class="letter-body">${escapeHTML(l.body)}</div></div>`).join(""):`<div class="empty">Здесь пока нет писем.<br>Первое может появиться сегодня.</div>`}</div>`}
 function setLetterPerson(index){currentPerson=index;render()}
-function addLetter(){const title=document.getElementById("letterTitle").value.trim(),body=document.getElementById("letterBody").value.trim();if(!body){alert("Сначала напиши письмо.");return}data.letters.push({from:people[currentPerson],title:title||"Без названия",body,date:dateNow()});save();render()}
+function addLetter(){const title=document.getElementById("letterTitle").value.trim(),body=document.getElementById("letterBody").value.trim();if(!body){alert("Сначала напиши письмо.");return}data.letters.push({from:people[currentPerson],title:title||"Без названия",body,date:dateNow(),id:"n"+Date.now().toString(36)+Math.random().toString(36).slice(2,6),ts:Date.now()});save();render()}
 function secretReady(){let total=0;chapters.forEach((c,ci)=>c.questions.forEach((q,qi)=>{const entry=data.entries[entryKey(ci,qi)];if(entry&&entry.some(a=>a&&a.trim()))total++}));return total>=5}
 function renderSecret(){if(data.secretUnlocked)return `<div class="paper page secret unlocked"><div class="paper-label">Особенная глава</div><h2>То, что осталось между строк</h2><p class="paper-desc">Эта глава немного глубже остальных. Отвечайте только на то, чем готовы поделиться.</p><div class="divider"></div>${secretQuestions.map((q,i)=>`<div class="entry"><div class="entry-meta">СЕКРЕТНЫЙ ВОПРОС ${i+1}</div><div class="entry-question">${q}</div><textarea id="secret-${i}" placeholder="Твой ответ..." oninput="saveSecret(${i})">${escapeHTML(data["secret"+i]||"")}</textarea></div>`).join("")}</div>`;return `<div class="paper page secret"><div class="lock">✧ 🔒 ✧</div><div class="paper-label">Закрытая глава</div><h2>Здесь есть кое-что ещё...</h2><p class="paper-desc">Некоторые страницы открываются не сразу. Для начала нужно оставить хотя бы пять ответов в основной книге.</p><div class="divider"></div><button class="primary" onclick="unlockSecret()">Проверить, открылась ли глава</button><p class="small">Глава не требует идеальных ответов. Достаточно искреннего желания участвовать.</p></div>`}
 function unlockSecret(){if(!secretReady()){alert("Пока недостаточно ответов. Заполните хотя бы пять вопросов.");return}data.secretUnlocked=true;save();render()}
 function saveSecret(i){data["secret"+i]=document.getElementById("secret-"+i).value;save()}
-function renderData(){return `<div class="paper page"><div class="paper-label">Сохранение истории</div><h2>Наш архив</h2><div class="paper-desc">Здесь можно сохранить книгу в файл, передать его другому человеку и объединить записи.</div><div class="divider"></div><div class="card"><h3>↓ Скачать архив</h3><p>Сохранить все ответы, комментарии, письма и задания в JSON-файл.</p><button class="primary" onclick="exportData()">Скачать архив</button></div><div class="card"><h3>↑ Загрузить архив</h3><p>Добавить данные из файла другого участника. Совпадающие записи будут объединены, непустые значения сохраняются.</p><input type="file" id="importFile" accept=".json,application/json"><button class="secondary" onclick="importData()">Импортировать архив</button></div><div class="notice">Важно: это локальный архив, а не облачная синхронизация. Не отправляйте файл посторонним — в нём могут быть личные записи.</div><div class="divider"></div><div class="card"><h3>Начать с чистого листа</h3><p>Удалит все данные этого дневника из текущего браузера.</p><button class="secondary" onclick="clearData()">Очистить дневник</button></div></div>`}
+function renderData(){return `<div class="paper page"><div class="paper-label">Сохранение истории</div><h2>Наш архив</h2><div class="paper-desc">Здесь можно сохранить книгу в файл, передать его другому человеку и объединить записи.</div><div class="divider"></div>${renderSyncCard()}<div class="card"><h3>↓ Скачать архив</h3><p>Сохранить все ответы, комментарии, письма и задания в JSON-файл.</p><button class="primary" onclick="exportData()">Скачать архив</button></div><div class="card"><h3>↑ Загрузить архив</h3><p>Добавить данные из файла другого участника. Совпадающие записи будут объединены, непустые значения сохраняются.</p><input type="file" id="importFile" accept=".json,application/json"><button class="secondary" onclick="importData()">Импортировать архив</button></div><div class="notice">Важно: это локальный архив, а не облачная синхронизация. Не отправляйте файл посторонним — в нём могут быть личные записи.</div><div class="divider"></div><div class="card"><h3>Начать с чистого листа</h3><p>Удалит все данные этого дневника из текущего браузера.</p><button class="secondary" onclick="clearData()">Очистить дневник</button></div></div>`}
 function exportData(){const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="nasha-istoriya-archive.json";a.click();URL.revokeObjectURL(url)}
 function importData(){
  const file=document.getElementById("importFile").files[0];if(!file){alert("Выбери JSON-файл.");return}
  const reader=new FileReader();reader.onload=()=>{try{
   const incoming=JSON.parse(reader.result);
   if(!incoming||typeof incoming!=="object"||!incoming.entries||!Array.isArray(incoming.letters))throw new Error("Неподдерживаемый формат архива");
-  Object.keys(incoming.entries).forEach(key=>{const existing=data.entries[key]||["",""],next=incoming.entries[key]||["",""];data.entries[key]=[existing[0]||next[0]||"",existing[1]||next[1]||""]});
-  Object.assign(data.comments,incoming.comments||{});Object.assign(data.tasks,incoming.tasks||{});
+  Object.keys(incoming.entries).forEach(key=>{if(!/^\d+-\d+$/.test(key))return;const existing=Array.isArray(data.entries[key])?data.entries[key]:["",""],next=Array.isArray(incoming.entries[key])?incoming.entries[key]:["",""];data.entries[key]=[existing[0]||next[0]||"",existing[1]||next[1]||""]});
+  Object.keys(incoming.comments||{}).forEach(key=>{if(/^\d+-\d+$/.test(key)&&!data.comments[key])data.comments[key]=incoming.comments[key]});
+  Object.keys(incoming.tasks||{}).forEach(key=>{if(/^\d+$/.test(key)&&incoming.tasks[key])data.tasks[key]=true});
+  const incomingStarts=Array.isArray(incoming.journeyStarts)?incoming.journeyStarts:[];
+  [0,1].forEach(p=>{const theirs=Number(incomingStarts[p]),mine=personStart(p);if(theirs>0)data.journeyStarts[p]=mine?Math.min(mine,theirs):theirs});
+  incoming.letters.forEach(l=>{if(l&&typeof l==="object")l.from=normalizeFrom(l.from)});
   data.letters=[...data.letters,...incoming.letters.filter(letter=>!data.letters.some(old=>old.date===letter.date&&old.body===letter.body&&old.from===letter.from))];
   for(let i=0;i<5;i++)if(!data["secret"+i]&&incoming["secret"+i])data["secret"+i]=incoming["secret"+i];
   data.secretUnlocked=data.secretUnlocked||!!incoming.secretUnlocked;save();alert("Архив успешно объединён ✧");render();
  }catch(e){alert("Не удалось прочитать архив. Проверь файл.")}};reader.readAsText(file)
 }
-function clearData(){if(!confirm("Точно удалить все записи этого дневника? Это действие нельзя отменить."))return;localStorage.removeItem(KEY);data={entries:{},comments:{},letters:[],tasks:{},secretUnlocked:false};render()}
+function clearData(){if(!confirm("Точно удалить все записи этого дневника? Это действие нельзя отменить."))return;localStorage.removeItem(KEY);data={entries:{},comments:{},letters:[],tasks:{},secretUnlocked:false,journeyStarts:[null,null]};currentChapter=0;currentQuestion=0;save();render()}
+/* ===== Общая книга (Firebase) ===== */
+const sync={key:null,ref:null,unsub:null,status:"Подключаюсь…"};let lastFlat={},pushTimer=null;
+try{sync.key=localStorage.getItem(KEY+"_room")}catch(e){}
+const hashKey=location.hash.match(/k=([a-z0-9]{16,})/);
+if(hashKey){sync.key=hashKey[1];try{localStorage.setItem(KEY+"_room",sync.key)}catch(e){}history.replaceState(null,"",location.pathname+location.search)}
+function syncConfigured(){return typeof FIREBASE_CONFIG!=="undefined"&&!!FIREBASE_CONFIG&&typeof firebase!=="undefined"}
+function hid(str){let h=5381;for(let i=0;i<str.length;i++)h=((h<<5)+h+str.charCodeAt(i))|0;return(h>>>0).toString(36)}
+function prepLetters(){data.letters.forEach(l=>{if(!l.id)l.id="x"+hid((l.from||"")+"|"+(l.date||"")+"|"+(l.body||""));if(typeof l.ts!=="number")l.ts=0})}
+function toFlat(){
+ const f={};
+ Object.keys(data.entries).forEach(k=>{const e=data.entries[k];if(!/^\d+-\d+$/.test(k)||!Array.isArray(e))return;[0,1].forEach(p=>{if(e[p])f["e_"+k.replace("-","_")+"_"+p]=e[p]})});
+ Object.keys(data.comments).forEach(k=>{if(data.comments[k])f["c_"+k.replace("-","_")]=data.comments[k]});
+ Object.keys(data.tasks).forEach(k=>{f["t_"+k]=!!data.tasks[k]});
+ for(let i=0;i<5;i++)if(data["secret"+i])f["s_"+i]=data["secret"+i];
+ prepLetters();data.letters.forEach(l=>{f["l_"+l.id]={from:l.from||"",title:l.title||"",body:l.body||"",date:l.date||"",ts:l.ts||0}});
+ [0,1].forEach(p=>{if(personStart(p))f["st_"+p]=personStart(p)});
+ if(data.secretUnlocked)f.su=true;
+ return f;
+}
+function focusedField(){const a=document.activeElement,id=a&&a.id;if(!id)return null;if(id==="answerInput")return"e_"+currentChapter+"_"+currentQuestion+"_"+currentPerson;if(id.startsWith("comment-"))return"c_"+id.slice(8).replace("-","_");if(id.startsWith("secret-"))return"s_"+id.slice(7);return null}
+function applyFlat(r){
+ const skip=focusedField();
+ Object.keys(r).forEach(k=>{
+  if(k===skip)return;const v=r[k],m=k.split("_");
+  if(m[0]==="e"&&m.length===4){const key=m[1]+"-"+m[2];if(!Array.isArray(data.entries[key]))data.entries[key]=["",""];data.entries[key][Number(m[3])]=String(v)}
+  else if(m[0]==="c"&&m.length===3)data.comments[m[1]+"-"+m[2]]=String(v);
+  else if(m[0]==="t"&&m.length===2)data.tasks[m[1]]=!!v;
+  else if(m[0]==="s"&&m.length===2)data["secret"+m[1]]=String(v);
+  else if(m[0]==="st"&&m.length===2){const p=Number(m[1]),t=Number(v),mine=personStart(p);if((p===0||p===1)&&t>0)data.journeyStarts[p]=mine?Math.min(mine,t):t}
+  else if(k==="su"&&v)data.secretUnlocked=true;
+  else if(k.startsWith("l_")&&v&&typeof v==="object"&&!data.letters.some(l=>l.id===k.slice(2)))data.letters.push({id:k.slice(2),from:normalizeFrom(v.from),title:v.title,body:v.body,date:v.date,ts:v.ts||0});
+ });
+ data.letters.sort((a,b)=>(a.ts||0)-(b.ts||0));
+}
+function setSyncStatus(t){sync.status=t;const el=document.getElementById("syncStatus");if(el)el.textContent=t}
+function syncPush(){
+ if(!sync.ref)return;clearTimeout(pushTimer);
+ pushTimer=setTimeout(()=>{const f=toFlat(),diff={};Object.keys(f).forEach(k=>{if(JSON.stringify(f[k])!==JSON.stringify(lastFlat[k]))diff[k]=f[k]});if(!Object.keys(diff).length)return;
+  sync.ref.set(diff,{merge:true}).then(()=>{Object.assign(lastFlat,diff);setSyncStatus("Синхронизировано ✧")}).catch(()=>setSyncStatus("Не удалось отправить. Проверь интернет."))},600);
+}
+function startSync(){
+ if(!sync.key||!syncConfigured())return;
+ try{
+  if(!firebase.apps.length)firebase.initializeApp(FIREBASE_CONFIG);
+  if(sync.unsub)sync.unsub();
+  sync.ref=firebase.firestore().collection("books").doc(sync.key);
+  sync.unsub=sync.ref.onSnapshot(snap=>{
+   if(snap.metadata.hasPendingWrites)return;
+   const before=JSON.stringify(data),r=snap.exists?snap.data():{};
+   applyFlat(r);lastFlat=Object.assign({},r);
+   try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){}
+   setSyncStatus("Синхронизировано ✧");syncPush();
+   const a=document.activeElement;
+   if(JSON.stringify(data)!==before&&!(a&&(a.tagName==="TEXTAREA"||a.tagName==="INPUT")))render();
+  },()=>setSyncStatus("Нет связи с общей книгой"));
+ }catch(e){console.warn(e);setSyncStatus("Ошибка подключения")}
+}
+function setRoom(k){sync.key=k;try{localStorage.setItem(KEY+"_room",k)}catch(e){}startSync()}
+function createRoom(){const a=new Uint8Array(20);crypto.getRandomValues(a);setRoom(Array.from(a,x=>"abcdefghijklmnopqrstuvwxyz0123456789"[x%36]).join(""));render()}
+function joinRoom(){const m=document.getElementById("roomInput").value.trim().match(/[a-z0-9]{16,}$/);if(!m){alert("Ключ не похож на настоящий. Скопируй ссылку или ключ целиком.");return}setRoom(m[0]);render()}
+function copyInvite(){const url=location.origin+location.pathname+"#k="+sync.key;(navigator.clipboard?navigator.clipboard.writeText(url):Promise.reject()).then(()=>alert("Ссылка скопирована. Отправь её второй участнице.")).catch(()=>prompt("Скопируй ссылку:",url))}
+function leaveRoom(){if(!confirm("Отключить общую книгу на этом устройстве? Записи на устройстве останутся, в общей книге тоже."))return;if(sync.unsub)sync.unsub();sync.unsub=null;sync.ref=null;sync.key=null;lastFlat={};try{localStorage.removeItem(KEY+"_room")}catch(e){}render()}
+function renderSyncCard(){
+ let body;
+ if(!syncConfigured())body="<p>Общая книга ещё не настроена: нужно один раз подключить Firebase по инструкции.</p>";
+ else if(!sync.key)body='<p>Создайте общую книгу — и ответы будут видны друг другу.</p><button class="primary" onclick="createRoom()">Создать общую книгу</button><label class="field-label">Или вставь ссылку или ключ от второй участницы</label><input id="roomInput" placeholder="Ссылка или ключ"><button class="secondary" onclick="joinRoom()">Подключиться</button>';
+ else body='<p>Общая книга подключена. <span id="syncStatus">'+sync.status+'</span></p><p class="small">Любой, у кого есть ссылка-приглашение, может читать и писать в книге. Не публикуйте её.</p><button class="primary" onclick="copyInvite()">Скопировать ссылку-приглашение</button><button class="secondary" onclick="leaveRoom()">Отключить на этом устройстве</button>';
+ return'<div class="card"><h3>☁ Общая книга</h3>'+body+"</div>";
+}
+startSync();
 render();
+setInterval(updateCountdowns,1000);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden)updateCountdowns()});
 </script>
 </body>
 </html>
